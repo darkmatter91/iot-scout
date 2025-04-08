@@ -1,6 +1,6 @@
 # IoT Scout
 
-IoT Scout is a Python-based tool designed to monitor processes on embedded devices via a serial connection. It provides a process table of running processes and an interactive menu to execute commands found in the /bin directory of the device. The tool classifies commands as standard or non-standard based on the Filesystem Hierarchy Standard (FHS) 3.0, highlighting non-standard commands for further investigation.
+IoT Scout is a Python-based tool designed to monitor processes on embedded devices via a serial connection. It provides a process table of running processes and an interactive menu to execute commands found in the `/bin` directory of the device. The tool classifies commands as standard or non-standard based on the Filesystem Hierarchy Standard (FHS) 3.0, highlighting non-standard commands for further investigation.
 
 ## Features
 - Monitors running processes on an embedded device using the ps command.
