@@ -38,7 +38,7 @@ pip install pyserial pandas tabulate colorama
   - The script will:
     - Wait 20 seconds for the device to boot.
     - Show a process table with running processes (from the ps command).
-    - Present a numbered menu of commands in /bin.
+    - Present a numbered menu of commands in `/bin`.
     - Allow you to enter a number to run a command and see its output, or 'q' to quit.
   - Interact with the Menu:
     - After the process table, you'll see a list of `/bin` commands with numbers.
