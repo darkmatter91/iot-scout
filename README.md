@@ -4,7 +4,7 @@ IoT Scout is a Python-based tool designed to monitor processes on embedded devic
 
 ## Features
 - Monitors running processes on an embedded device using the ps command.
-- Lists commands in the /bin directory of the device, classifying them as standard (green) or non-standard (red).
+- Lists commands in the `/bin` directory of the device, classifying them as standard (green) or non-standard (red).
 - Provides an interactive menu to run /bin commands and capture their output.
 - Includes robust error handling for serial port issues and invalid inputs.
 
