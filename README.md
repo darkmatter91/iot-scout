@@ -92,6 +92,6 @@ This tool is provided for educational purposes only. The author, Darkma773r, is 
 
 ## License
 
-This project is licensed under the MIT License. See the  file for details.
+This project is licensed under the MIT License.
 
 
