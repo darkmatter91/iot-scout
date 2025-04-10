@@ -16,6 +16,9 @@ IoT Scout is a Python-based tool designed to monitor processes on embedded devic
 - **NEW**: Improved serial port handling with detailed error messages.
 - **NEW**: Support for analyzing local firmware files.
 - **NEW**: Detection of vendor-specific and custom commands.
+- **NEW**: Sensitive file searching in both live UART and firmware analysis modes.
+- **NEW**: Markdown report generation with process tables and sensitive information.
+- **NEW**: Support for searching and analyzing passwd.bak and other backup files.
 
 ## Requirements
 
@@ -26,10 +29,11 @@ To run IoT Scout, you'll need the following dependencies:
 - pandas
 - tabulate
 - colorama
+- binwalk (for firmware analysis)
 
 Install the dependencies using pip:
 ```bash
-pip install pyserial pandas tabulate colorama
+pip install pyserial pandas tabulate colorama binwalk
 ```
 
 ## Usage
@@ -44,9 +48,10 @@ pip install pyserial pandas tabulate colorama
   ``` bash
   python iot_scout.py
   ```
-  - The script will present a startup menu with two options:
+  - The script will present a startup menu with three options:
     1. Capture live from UART
     2. Recon from local firmware
+    3. Search for sensitive information
 
 ### Live UART Capture Mode
 - The script will:
@@ -54,6 +59,8 @@ pip install pyserial pandas tabulate colorama
   - Show a process table with running processes (from the ps command).
   - Present a numbered menu of commands in `/bin`.
   - Allow you to enter a number to run a command and see its output, or 'q' to quit.
+  - Option to search for sensitive files and information on the device.
+  - Generate a Markdown report with findings.
 - Interact with the Menu:
   - After the process table, you'll see a list of `/bin` commands with numbers.
   - Enter the number of a command to execute it on the device and see the output.
@@ -66,6 +73,25 @@ pip install pyserial pandas tabulate colorama
   - Analyze and classify all commands found.
   - Display a comprehensive analysis of standard and non-standard commands.
   - Search for common IoT binaries throughout the firmware.
+  - Option to search for sensitive files and information in the firmware.
+  - Generate a Markdown report with findings.
+
+### Sensitive Information Search
+- The tool will search for:
+  - Critical system files (passwd, shadow, passwd.bak)
+  - Configuration files containing sensitive information
+  - Passwords and credentials
+  - API keys and secrets
+  - User account information
+- Results are displayed in real-time and included in the generated report.
+
+### Report Generation
+- Generates a Markdown-formatted report that includes:
+  - Process list with classifications
+  - Found sensitive files and their contents
+  - Pattern matches for sensitive information
+  - Timestamps and metadata
+- Reports can be viewed on GitHub or Obsidian for better readability.
 
 ## Command Classification
 IoT Scout classifies commands into the following categories:
@@ -95,8 +121,9 @@ Author: Darkma773r (https://github.com/darkmatter91)
 === IoT Scout Startup Menu ===
 1. Capture live from UART
 2. Recon from local firmware
+3. Search for sensitive information
 
-Enter your choice (1-2): 1
+Enter your choice (1-3): 1
 
 [+] Waiting for device to boot (20 seconds)...
 [+] Device boot wait complete.
@@ -117,12 +144,17 @@ Enter your choice (1-2): 1
 3. cat (Standard Linux Command)
 4. wscd (Non-Standard (Vendor/Custom))
 
-[+] Enter the number of the command to run (or 'q' to quit):
-> 1
+Would you like to search for sensitive information? (y/n): y
 
-[+] Running command: ash
-[+] Output:
-[Output of ash command]
+[+] Searching for sensitive files on the device...
+[*] Contents of /etc/passwd.bak:
+  root:x:0:0:root:/root:/bin/sh
+  admin:x:0:0:admin:/home/admin:/bin/sh
+  ...
+
+Would you like to generate a report? (y/n): y
+[+] Report generated: iot_scout_report_20240220_123456.md
+[+] The report is in Markdown format and can be viewed on GitHub or Obsidian
 
 [+] Enter the number of the command to run (or 'q' to quit):
 > q
@@ -136,5 +168,7 @@ This tool is provided for educational purposes only. The author, Darkma773r, is 
 ## License
 
 This project is licensed under the MIT License. See the attached file.
+
+
 
 
