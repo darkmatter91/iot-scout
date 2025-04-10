@@ -231,9 +231,10 @@ class CommandClassifier:
 class SerialManager:
     """Manages serial communication with the device."""
     
-    def __init__(self, port: str = Config.SERIAL_PORT):
+    def __init__(self, port: str = Config.SERIAL_PORT, baud_rate: int = Config.BAUD_RATE):
         """Initialize serial connection."""
         self.port = port
+        self.baud_rate = baud_rate
         self.serial_port = None
         self.connect()
 
@@ -246,7 +247,7 @@ class SerialManager:
                 
             self.serial_port = serial.Serial(
                 port=self.port,
-                baudrate=Config.BAUD_RATE,
+                baudrate=self.baud_rate,
                 bytesize=Config.BYTE_SIZE,
                 timeout=Config.TIMEOUT,
                 stopbits=serial.STOPBITS_ONE
@@ -310,70 +311,217 @@ class SerialManager:
         """Search for sensitive files on the device via UART."""
         print(f"{Colors.CYAN}[+] Searching for sensitive files on the device...{Colors.RESET}")
         
-        # Critical system files that we want to show contents for
-        critical_files = {
-            '/etc/passwd',
-            '/etc/shadow',
-            'etc/passwd',
-            'etc/shadow',
-            '/etc/passwd.bak',
-            'etc/passwd.bak'
-        }
-        
-        # Other sensitive files to search for
-        sensitive_files = [
-            '/etc/config/passwd',
-            '/etc/config/shadow',
-            'config/passwd',
-            'config/shadow',
-            'etc/config/passwd',
-            'etc/config/shadow',
-            'config/passwd',
-            'config/shadow'
-        ]
-        
         # Dictionary to store files by type
         files_by_type = {}
+        pattern_matches = {}
         
-        # Search for critical and sensitive files
-        for file_pattern in list(critical_files) + sensitive_files:
+        # First, search for critical system files with a more thorough approach
+        critical_files = [
+            'passwd',
+            'shadow',
+            'passwd.bak',
+            'shadow.bak'
+        ]
+        
+        # Common directories to search in
+        common_dirs = [
+            '/',
+            '/etc',
+            '/etc/config',
+            '/etc/default',
+            '/etc/init.d',
+            '/etc/rc.d',
+            '/bin',
+            '/sbin',
+            '/usr/bin',
+            '/usr/sbin',
+            '/var',
+            '/var/etc',
+            '/var/config',
+            '/var/run',
+            '/var/tmp',
+            '/tmp',
+            '/root',
+            '/home',
+            '/opt',
+            '/mnt',
+            '/media',
+            '/proc',
+            '/sys'
+        ]
+        
+        # First try a direct search for the files
+        for filename in critical_files:
+            print(f"{Colors.CYAN}[+] Searching for {filename} files...{Colors.RESET}")
             # Use find command to locate files
-            find_cmd = f"find / -name {file_pattern.split('/')[-1]} 2>/dev/null"
+            find_cmd = f"find / -name {filename} -type f 2>/dev/null"
             output = self.send_command(find_cmd)
             
-            if output:
-                for file_path in output.splitlines():
-                    if file_path.strip():
-                        file_type = self.get_file_type(file_path)
-                        if file_type not in files_by_type:
-                            files_by_type[file_type] = set()
-                        files_by_type[file_type].add(file_path)
-                        
-                        # Show contents for passwd and bak files
-                        if file_type in ['passwd', 'bak']:
-                            print(f"\n{Colors.YELLOW}[*] Contents of {file_path}:{Colors.RESET}")
-                            cat_output = self.send_command(f"cat {file_path}")
-                            if cat_output:
-                                for line in cat_output.splitlines():
-                                    if line.strip():
-                                        print(f"  {line.strip()}")
+            # Clean the output to remove command echo and shell prompts
+            if output and output.strip():
+                # Remove the command itself and any shell prompts from the output
+                clean_output = output.replace(find_cmd, "")
+                # Remove common shell prompts
+                for prompt in [">", "#", "$", "> ", "# ", "$ "]:
+                    clean_output = clean_output.replace(prompt, "")
+                clean_output = clean_output.strip()
+                
+                if clean_output:
+                    for file_path in clean_output.splitlines():
+                        if file_path.strip():
+                            # Verify this is a file, not a directory or log message
+                            ls_cmd = f"ls -l {file_path} 2>/dev/null"
+                            ls_output = self.send_command(ls_cmd)
+                            
+                            # Clean the output
+                            if ls_output and ls_output.strip():
+                                clean_ls_output = ls_output
+                                for prompt in [">", "#", "$", "> ", "# ", "$ "]:
+                                    clean_ls_output = clean_ls_output.replace(prompt, "")
+                                clean_ls_output = clean_ls_output.strip()
+                                
+                                # Check if it's a regular file (not a directory or special file)
+                                if clean_ls_output and "-rw" in clean_ls_output:
+                                    file_type = self.get_file_type(file_path)
+                                    if file_type not in files_by_type:
+                                        files_by_type[file_type] = set()
+                                    files_by_type[file_type].add(file_path)
+                                    
+                                    # Show contents for passwd and bak files
+                                    if file_type in ['passwd', 'bak']:
+                                        print(f"\n{Colors.YELLOW}[*] Found: {file_path}{Colors.RESET}")
+                                        cat_cmd = f"cat {file_path}"
+                                        cat_output = self.send_command(cat_cmd)
+                                        # Clean the output to remove command echo and shell prompts
+                                        if cat_output and cat_output.strip():
+                                            clean_cat_output = cat_output.replace(cat_cmd, "")
+                                            # Remove common shell prompts
+                                            for prompt in [">", "#", "$", "> ", "# ", "$ "]:
+                                                clean_cat_output = clean_cat_output.replace(prompt, "")
+                                            clean_cat_output = clean_cat_output.strip()
+                                            
+                                            if clean_cat_output:
+                                                print(f"{Colors.YELLOW}[*] Contents:{Colors.RESET}")
+                                                for line in clean_cat_output.splitlines():
+                                                    if line.strip():
+                                                        print(f"  {line.strip()}")
         
-        # Search for sensitive patterns
-        pattern_matches = {}
+        # Search for configuration files that might contain sensitive information
+        config_files = [
+            'config',
+            'conf',
+            'cfg'
+        ]
+        
+        for ext in config_files:
+            print(f"{Colors.CYAN}[+] Searching for .{ext} files...{Colors.RESET}")
+            find_cmd = f"find / -name '*.{ext}' -type f 2>/dev/null"
+            output = self.send_command(find_cmd)
+            
+            # Clean the output to remove command echo and shell prompts
+            if output and output.strip():
+                clean_output = output.replace(find_cmd, "")
+                # Remove common shell prompts
+                for prompt in [">", "#", "$", "> ", "# ", "$ "]:
+                    clean_output = clean_output.replace(prompt, "")
+                clean_output = clean_output.strip()
+                
+                if clean_output:
+                    for file_path in clean_output.splitlines():
+                        if file_path.strip():
+                            # Verify this is a file, not a directory or log message
+                            ls_cmd = f"ls -l {file_path} 2>/dev/null"
+                            ls_output = self.send_command(ls_cmd)
+                            
+                            # Clean the output
+                            if ls_output and ls_output.strip():
+                                clean_ls_output = ls_output
+                                for prompt in [">", "#", "$", "> ", "# ", "$ "]:
+                                    clean_ls_output = clean_ls_output.replace(prompt, "")
+                                clean_ls_output = clean_ls_output.strip()
+                                
+                                # Check if it's a regular file
+                                if clean_ls_output and "-rw" in clean_ls_output:
+                                    file_type = ext
+                                    if file_type not in files_by_type:
+                                        files_by_type[file_type] = set()
+                                    files_by_type[file_type].add(file_path)
+        
+        # Search for sensitive patterns in all files
+        print(f"{Colors.CYAN}[+] Searching for sensitive patterns...{Colors.RESET}")
         for category, patterns in LocalFirmwareAnalyzer.SENSITIVE_PATTERNS.items():
             pattern_matches[category] = {}
+            print(f"{Colors.YELLOW}[*] {category}:{Colors.RESET}")
+            
             for pattern in patterns:
-                # Use grep to search for patterns
-                grep_cmd = f"grep -r '{pattern}' / 2>/dev/null"
+                # Use grep to search for patterns, but only in regular files
+                # Add -h to suppress filenames and -n to show line numbers
+                # Add -i for case-insensitive search and -m 3 to limit to 3 matches per file
+                # Remove any -z option that might cause entire file output
+                # Add --line-buffered to ensure line-by-line output
+                grep_cmd = f"grep -r -h -n -i -m 3 --line-buffered '{pattern}' / --include='*.txt' --include='*.conf' --include='*.cfg' --include='*.config' 2>/dev/null"
                 output = self.send_command(grep_cmd)
                 
-                if output:
-                    for line in output.splitlines():
-                        if ':' in line:
-                            file_path, content = line.split(':', 1)
-                            if file_path not in pattern_matches[category]:
-                                pattern_matches[category][file_path] = []
-                            pattern_matches[category][file_path].append(content.strip())
+                # Clean the output to remove command echo and shell prompts
+                if output and output.strip():
+                    clean_output = output.replace(grep_cmd, "")
+                    # Remove common shell prompts
+                    for prompt in [">", "#", "$", "> ", "# ", "$ "]:
+                        clean_output = clean_output.replace(prompt, "")
+                    clean_output = clean_output.strip()
+                    
+                    if clean_output:
+                        # Process each line of output
+                        for line in clean_output.splitlines():
+                            if ':' in line:
+                                # Split by the first colon to separate filename and line number
+                                parts = line.split(':', 1)
+                                if len(parts) == 2:
+                                    file_path, content = parts
+                                    if file_path.strip():
+                                        # Verify this is a file, not a directory or log message
+                                        ls_cmd = f"ls -l {file_path} 2>/dev/null"
+                                        ls_output = self.send_command(ls_cmd)
+                                        
+                                        # Clean the output
+                                        if ls_output and ls_output.strip():
+                                            clean_ls_output = ls_output
+                                            for prompt in [">", "#", "$", "> ", "# ", "$ "]:
+                                                clean_ls_output = clean_ls_output.replace(prompt, "")
+                                            clean_ls_output = clean_ls_output.strip()
+                                            
+                                            # Check if it's a regular file
+                                            if clean_ls_output and "-rw" in clean_ls_output:
+                                                # Filter out JavaScript and large configuration files
+                                                if not file_path.endswith('.js') and not file_path.endswith('.json'):
+                                                    if file_path not in pattern_matches[category]:
+                                                        pattern_matches[category][file_path] = []
+                                                    
+                                                    # Truncate content if it's too long (more than 100 chars)
+                                                    if len(content) > 100:
+                                                        content = content[:100] + "..."
+                                                    
+                                                    pattern_matches[category][file_path].append(content.strip())
+            
+            # Display matches for this category
+            if pattern_matches[category]:
+                for file_path, matches in pattern_matches[category].items():
+                    print(f"{Colors.GREEN}{file_path}{Colors.RESET}")
+                    # For files with many matches, just show the count instead of all matches
+                    if len(matches) > 3:
+                        print(f"  Found {len(matches)} matches")
+                    else:
+                        # Show up to 3 matches per file
+                        for match in matches[:3]:
+                            print(f"  {match}")
+            else:
+                print(f"{Colors.YELLOW}  Not Found{Colors.RESET}")
+        
+        # Ensure all file types are represented in the output, even if not found
+        for file_type in ['passwd', 'shadow', 'bak', 'config', 'conf', 'cfg']:
+            if file_type not in files_by_type:
+                files_by_type[file_type] = set()
+                print(f"{Colors.YELLOW}[*] {file_type} files: Not Found{Colors.RESET}")
         
         return files_by_type, pattern_matches
     
@@ -438,9 +586,23 @@ class LocalFirmwareAnalyzer:
         'User Accounts': [
             r'root:.*:0:0:',
             r'admin:.*:0:0:',
-            r'user\s*[=:]\s*[\'"][^\'"]+[\'"]'
+            r'user\s*[=:]\s*[\'"][^\'"]+[\'"]',
+            r'username\s*[=:]\s*[\'"][^\'"]+[\'"]',
+            r'login\s*[=:]\s*[\'"][^\'"]+[\'"]'
         ]
     }
+    
+    # File extensions to exclude from pattern matching
+    EXCLUDED_EXTENSIONS = [
+        '.cpp', '.c', '.h', '.hpp', '.java', '.py', '.js', '.html', '.css', 
+        '.xml', '.json', '.md', '.txt', '.log', '.sh', '.bat', '.ps1'
+    ]
+    
+    # Keywords that indicate code comments or debug statements
+    COMMENT_INDICATORS = [
+        '//', '/*', '*/', '#', 'DEBUG', 'LOG', 'PRINT', 'ECHO', 'printf', 
+        'console.log', 'System.out.println', 'cout <<', 'fprintf'
+    ]
     
     def __init__(self, firmware_path: str):
         """Initialize firmware analyzer."""
@@ -464,6 +626,37 @@ class LocalFirmwareAnalyzer:
         # Check if the input is a .bin file
         if self.firmware_path.endswith('.bin'):
             self.extract_firmware()
+            
+    def is_likely_code_or_comment(self, file_path: str, content: str) -> bool:
+        """Check if a file is likely to be code or contains comments."""
+        # Check file extension
+        _, ext = os.path.splitext(file_path)
+        if ext.lower() in self.EXCLUDED_EXTENSIONS:
+            return True
+            
+        # Check for comment indicators
+        for indicator in self.COMMENT_INDICATORS:
+            if indicator in content:
+                return True
+                
+        return False
+    
+    @staticmethod
+    def try_read_file(file_path: str) -> Tuple[str, bool]:
+        """Try to read a file with different encodings and methods."""
+        try:
+            with open(file_path, 'rb') as f:
+                content = f.read()
+                # Try different encodings
+                for encoding in ['utf-8', 'latin-1', 'ascii']:
+                    try:
+                        return content.decode(encoding), True
+                    except UnicodeDecodeError:
+                        continue
+                # If all decodings fail, return raw content
+                return content.decode('latin-1', errors='replace'), True
+        except Exception:
+            return "", False
             
     def extract_firmware(self) -> None:
         """Extract firmware using binwalk."""
@@ -505,7 +698,7 @@ class LocalFirmwareAnalyzer:
                     import subprocess
                     with suppress_stderr():
                         result = subprocess.run(['jefferson', '-d', jffs2_dir, self.firmware_path], 
-                                             capture_output=True, text=True)
+                                          capture_output=True, text=True)
                     
                     if result.returncode == 0:
                         # Verify that files were actually extracted
@@ -575,24 +768,7 @@ class LocalFirmwareAnalyzer:
             print(f"{Colors.YELLOW}[!] Using original firmware path.{Colors.RESET}")
             self.firmware_path = os.path.dirname(self.firmware_path)  # Use the directory containing the firmware
             
-    @staticmethod
-    def try_read_file(file_path: str) -> Tuple[str, bool]:
-        """Try to read a file with different encodings and methods."""
-        try:
-            with open(file_path, 'rb') as f:
-                content = f.read()
-                # Try different encodings
-                for encoding in ['utf-8', 'latin-1', 'ascii']:
-                    try:
-                        return content.decode(encoding), True
-                    except UnicodeDecodeError:
-                        continue
-                # If all decodings fail, return raw content
-                return content.decode('latin-1', errors='replace'), True
-        except Exception:
-            return "", False
-
-    def search_sensitive_files(self) -> None:
+    def search_sensitive_files(self) -> Tuple[Dict[str, Set[str]], Dict[str, Dict[str, List[str]]]]:
         """Search for sensitive files and content in the firmware."""
         # Critical system files that we want to show contents for
         critical_files = {
@@ -668,6 +844,10 @@ class LocalFirmwareAnalyzer:
                         file_path = os.path.join(root, file)
                         content, success = self.try_read_file(file_path)
                         if success:
+                            # Skip files that are likely code or comments
+                            if self.is_likely_code_or_comment(file_path, content):
+                                continue
+                                
                             try:
                                 matches = list(re.finditer(pattern, content, re.IGNORECASE))
                                 if matches:
@@ -833,28 +1013,35 @@ class LocalFirmwareAnalyzer:
             f.write("## Files by Type\n\n")
             for file_type, files in sorted(files_by_type.items()):
                 f.write(f"### {file_type} files\n\n")
-                for file_path in sorted(files):
-                    f.write(f"- `{file_path}`\n")
-                    # Show contents for passwd and bak files
-                    if file_type in ['passwd', 'bak']:
-                        content, success = self.try_read_file(file_path)
-                        if success and content.strip():
-                            f.write("\n```\n")
-                            for line in content.splitlines():
-                                if line.strip():
-                                    f.write(f"{line.strip()}\n")
-                            f.write("```\n\n")
+                if files:
+                    for file_path in sorted(files):
+                        f.write(f"- `{file_path}`\n")
+                        # Show contents for passwd and bak files
+                        if file_type in ['passwd', 'bak']:
+                            content, success = self.try_read_file(file_path)
+                            if success and content.strip():
+                                f.write("\n```\n")
+                                for line in content.splitlines():
+                                    if line.strip():
+                                        f.write(f"{line.strip()}\n")
+                                f.write("```\n\n")
+                else:
+                    f.write("**Not Found**\n\n")
             
             # Write sensitive pattern matches
             f.write("## Sensitive Pattern Matches\n\n")
             for category, files in pattern_matches.items():
                 f.write(f"### {category}\n\n")
-                for file_path, matches in sorted(files.items()):
-                    f.write(f"#### File: `{file_path}`\n\n")
-                    f.write("```\n")
-                    for match in matches:
-                        f.write(f"- {match}\n")
-                    f.write("```\n\n")
+                if files:
+                    for file_path, matches in sorted(files.items()):
+                        f.write(f"#### File: `{file_path}`\n\n")
+                        f.write("```\n")
+                        for match in matches:
+                            f.write(f"- {match}\n")
+                        f.write("```\n\n")
+                else:
+                    f.write(f"#### {category}\n\n")
+                    f.write("**Not Found**\n\n")
             
             # Write footer
             f.write("---\n\n")
@@ -863,6 +1050,31 @@ class LocalFirmwareAnalyzer:
         
         print(f"\n{Colors.GREEN}[+] Report generated: {report_file}{Colors.RESET}")
         print(f"{Colors.CYAN}[+] The report is in Markdown format and can be viewed on GitHub or Obsidian{Colors.RESET}")
+        
+    def analyze_firmware(self) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+        """Analyze the firmware and return binary and IoT-specific results."""
+        print(f"{Colors.CYAN}[+] Analyzing firmware: {self.firmware_path}{Colors.RESET}")
+        
+        # Find bin directories
+        try:
+            bin_dirs = self.find_bin_directories()
+        except RuntimeError as e:
+            print(f"{Colors.YELLOW}[!] {e}{Colors.RESET}")
+            print(f"{Colors.YELLOW}[!] Continuing with other analysis...{Colors.RESET}")
+            bin_dirs = []
+        
+        # Analyze bin directories
+        bin_results = {}
+        if bin_dirs:
+            bin_results = self.analyze_bin_directories()
+        
+        # Find common IoT binaries
+        iot_results = self.find_common_iot_binaries()
+        
+        # Display analysis results
+        self.display_analysis(bin_results, iot_results)
+        
+        return bin_results, iot_results
 
 class ProcessMonitor:
     """Handles process monitoring and display."""
@@ -1000,19 +1212,31 @@ class CommandMenu:
         
         return True
 
-def display_banner() -> None:
+def display_banner():
     """Display the application banner."""
-    banner = """
-      ____    ______   _____                  __ 
-     /  _/___/_  __/  / ___/_________  __  __/ /_
-     / // __ \\/ /     \\__ \\/ ___/ __ \\/ / / / __/
-   _/ // /_/ / /     ___/ / /__/ /_/ / /_/ / /_  
-  /___/\\____/_/     /____/\\___/\\____/\\__,_/\\__/  
-                                             
-
-Author: Darkma773r (https://github.com/darkmatter91)
-"""
-    print(f"{Colors.CYAN}{banner}{Colors.RESET}")
+    # Define the banner without any indentation
+    banner_lines = [
+        "      ____    ______   _____                  __ ",
+        "     /  _/___/_  __/  / ___/_________  __  __/ /_",
+        "     / // __ \\/ /     \\__ \\/ ___/ __ \\/ / / / __/",
+        "   _/ // /_/ / /     ___/ / /__/ /_/ / /_/ / /_  ",
+        "  /___/\\____/_/     /____/\\___/\\____/\\__,_/\\__/  ",
+        "                                             ",
+        "",
+        "Author: Darkma773r (https://github.com/darkmatter91)"
+    ]
+    
+    # Calculate the width of the terminal
+    terminal_width = 80
+    
+    # Center each line
+    centered_banner = ""
+    for line in banner_lines:
+        # Calculate padding to center the line
+        padding = (terminal_width - len(line)) // 2
+        centered_banner += " " * padding + line + "\n"
+    
+    print(f"{Colors.CYAN}{centered_banner}{Colors.RESET}")
 
 def display_startup_menu() -> int:
     """Display the startup menu and get user choice."""
@@ -1065,6 +1289,9 @@ def get_firmware_path() -> str:
     readline.parse_and_bind("tab: complete")
     readline.set_completer(complete_path)
     
+    # Print instructions for tab completion
+    print(f"{Colors.CYAN}[+] Tab completion is enabled. Press TAB to complete file paths.{Colors.RESET}")
+    
     while True:
         try:
             path = input(f"\n{Colors.CYAN}Enter the path to the firmware directory: {Colors.RESET}")
@@ -1078,110 +1305,87 @@ def get_firmware_path() -> str:
             print(f"{Colors.RED}[!] Error: {e}{Colors.RESET}")
 
 def main():
-    """Main application entry point."""
+    """Main function to run the IoT Scout application."""
     try:
+        # Initialize readline for tab completion
+        try:
+            import readline
+            readline.parse_and_bind("tab: complete")
+            print(f"{Colors.GREEN}[+] Tab completion enabled{Colors.RESET}")
+        except ImportError:
+            print(f"{Colors.YELLOW}[!] readline module not available. Tab completion will not work.{Colors.RESET}")
+        
+        # Initialize components
+        serial_manager = None
+        process_monitor = None
+        command_menu = None
+        analyzer = None
+        files_by_type = {}
+        pattern_matches = {}
+        bin_results = {}
+        iot_results = {}
+        process_data = None
+        
+        # Display banner
         display_banner()
         
-        # Get user choice
-        choice = display_startup_menu()
+        # Display welcome message
+        print(f"{Colors.CYAN}{'=' * 80}{Colors.RESET}")
+        print(f"{Colors.CYAN}{'IoT Scout - IoT Device Analysis Tool':^80}{Colors.RESET}")
+        print(f"{Colors.CYAN}{'=' * 80}{Colors.RESET}")
         
-        if choice == 1:
-            # Live UART capture
-            serial_manager = SerialManager()
-            serial_manager.wait_for_boot()
+        # Display menu
+        while True:
+            print(f"\n{Colors.CYAN}Menu Options:{Colors.RESET}")
+            print(f"{Colors.YELLOW}1. Capture live from UART{Colors.RESET}")
+            print(f"{Colors.YELLOW}2. Recon from local firmware{Colors.RESET}")
+            print(f"{Colors.YELLOW}3. Search for sensitive information{Colors.RESET}")
+            print(f"{Colors.YELLOW}4. Generate report{Colors.RESET}")
+            print(f"{Colors.YELLOW}5. Exit{Colors.RESET}")
             
-            process_monitor = ProcessMonitor(serial_manager)
-            command_menu = CommandMenu(serial_manager)
+            choice = input(f"\n{Colors.CYAN}Enter your choice (1-5): {Colors.RESET}").strip()
             
-            # Get initial process list
-            process_data = process_monitor.get_process_list()
-            process_monitor.display_process_list()
-            command_menu.display_menu()
-            
-            # Ask if user wants to search for sensitive information
-            while True:
-                search_choice = input(f"\n{Colors.CYAN}Would you like to search for sensitive information? (y/n): {Colors.RESET}").strip().lower()
-                if search_choice in ['y', 'n']:
-                    break
-                print(f"{Colors.YELLOW}[!] Please enter 'y' or 'n'{Colors.RESET}")
-            
-            if search_choice == 'y':
-                # Search for sensitive files via UART
-                files_by_type, pattern_matches = serial_manager.search_sensitive_files()
+            if choice == '1':
+                # Option 1: Capture live from UART
+                port = input(f"{Colors.CYAN}Enter UART port (e.g., /dev/ttyUSB0): {Colors.RESET}").strip()
+                baud_rate = input(f"{Colors.CYAN}Enter baud rate (default: 115200): {Colors.RESET}").strip() or "115200"
                 
-                # Ask if user wants to generate a report
-                while True:
-                    report_choice = input(f"\n{Colors.CYAN}Would you like to generate a report? (y/n): {Colors.RESET}").strip().lower()
-                    if report_choice in ['y', 'n']:
-                        break
-                    print(f"{Colors.YELLOW}[!] Please enter 'y' or 'n'{Colors.RESET}")
+                try:
+                    serial_manager = SerialManager(port, int(baud_rate))
+                    print(f"{Colors.GREEN}[+] Connected to {port} at {baud_rate} baud{Colors.RESET}")
+                    
+                    # Initialize process monitor and command menu with serial_manager
+                    process_monitor = ProcessMonitor(serial_manager)
+                    command_menu = CommandMenu(serial_manager)
+                    
+                    # Display process list
+                    process_data = process_monitor.get_process_list()
+                    process_monitor.display_process_list()
+                    command_menu.display_menu()
+                    
+                    # Ask if user wants to search for sensitive information
+                    while True:
+                        search_choice = input(f"\n{Colors.CYAN}Would you like to search for sensitive information? (y/n): {Colors.RESET}").strip().lower()
+                        if search_choice in ['y', 'n']:
+                            break
+                        print(f"{Colors.YELLOW}[!] Please enter 'y' or 'n'{Colors.RESET}")
+                    
+                    if search_choice == 'y':
+                        # Search for sensitive files via UART
+                        files_by_type, pattern_matches = serial_manager.search_sensitive_files()
                 
-                if report_choice == 'y':
-                    # Generate report with process information
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    report_file = f"iot_scout_report_{timestamp}.md"
-                    
-                    with open(report_file, 'w') as f:
-                        # Write header
-                        f.write("# IoT Scout Analysis Report\n\n")
-                        f.write("---\n\n")
-                        f.write(f"**Analysis Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        f.write(f"**Analysis Type:** Live UART Capture\n\n")
-                        
-                        # Write process list
-                        f.write(process_monitor.generate_process_report(process_data, timestamp))
-                        f.write("\n")
-                        
-                        # Write files by type
-                        f.write("## Files by Type\n\n")
-                        for file_type, files in sorted(files_by_type.items()):
-                            f.write(f"### {file_type} files\n\n")
-                            for file_path in sorted(files):
-                                f.write(f"- `{file_path}`\n")
-                                if file_type in ['passwd', 'bak']:
-                                    cat_output = serial_manager.send_command(f"cat {file_path}")
-                                    if cat_output:
-                                        f.write("\n```\n")
-                                        for line in cat_output.splitlines():
-                                            if line.strip():
-                                                f.write(f"{line.strip()}\n")
-                                        f.write("```\n\n")
-                        
-                        # Write sensitive pattern matches
-                        f.write("## Sensitive Pattern Matches\n\n")
-                        for category, files in pattern_matches.items():
-                            f.write(f"### {category}\n\n")
-                            for file_path, matches in sorted(files.items()):
-                                f.write(f"#### File: `{file_path}`\n\n")
-                                f.write("```\n")
-                                for match in matches:
-                                    f.write(f"- {match}\n")
-                                f.write("```\n\n")
-                        
-                        # Write footer
-                        f.write("---\n\n")
-                        f.write("Report generated by IoT Scout\n")
-                        f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                    
-                    print(f"\n{Colors.GREEN}[+] Report generated: {report_file}{Colors.RESET}")
-                    print(f"{Colors.CYAN}[+] The report is in Markdown format and can be viewed on GitHub or Obsidian{Colors.RESET}")
+                except Exception as e:
+                    print(f"{Colors.RED}[!] Error connecting to UART: {e}{Colors.RESET}")
+                    continue
             
-            while True:
-                print(f"\n{Colors.CYAN}[+] Enter the number of the command to run (or 'q' to quit):{Colors.RESET}")
-                cmd_choice = input("> ").strip().lower()
-                if not command_menu.execute_command(cmd_choice):
-                    break
-                    
-        else:
-            # Local firmware analysis
-            firmware_path = get_firmware_path()
-            analyzer = LocalFirmwareAnalyzer(firmware_path)
-            
-            try:
-                if choice == 2:
-                    bin_results = analyzer.analyze_bin_directories()
-                    iot_results = analyzer.find_common_iot_binaries()
-                    analyzer.display_analysis(bin_results, iot_results)
+            elif choice == '2':
+                # Option 2: Recon from local firmware
+                # Use tab completion for firmware path
+                firmware_path = get_firmware_path()
+                
+                try:
+                    analyzer = LocalFirmwareAnalyzer(firmware_path)
+                    bin_results, iot_results = analyzer.analyze_firmware()
                     
                     # Ask if user wants to search for sensitive information
                     while True:
@@ -1193,26 +1397,116 @@ def main():
                     if search_choice == 'y':
                         # Get files by type and pattern matches from search_sensitive_files
                         files_by_type, pattern_matches = analyzer.search_sensitive_files()
-                        
-                        # Ask if user wants to generate a report
-                        while True:
-                            report_choice = input(f"\n{Colors.CYAN}Would you like to generate a report? (y/n): {Colors.RESET}").strip().lower()
-                            if report_choice in ['y', 'n']:
-                                break
-                            print(f"{Colors.YELLOW}[!] Please enter 'y' or 'n'{Colors.RESET}")
-                        
-                        if report_choice == 'y':
-                            analyzer.generate_report(bin_results, iot_results, files_by_type, pattern_matches)
-                else:  # choice == 3
-                    analyzer.search_sensitive_files()
-            except Exception as e:
-                print(f"{Colors.RED}[!] Error analyzing firmware: {e}{Colors.RESET}")
                 
+                except Exception as e:
+                    print(f"{Colors.RED}[!] Error analyzing firmware: {e}{Colors.RESET}")
+                    continue
+            
+            elif choice == '3':
+                # Option 3: Search for sensitive information
+                if serial_manager:
+                    # Use UART connection if available
+                    files_by_type, pattern_matches = serial_manager.search_sensitive_files()
+                elif analyzer:
+                    # Use firmware analyzer if available
+                    files_by_type, pattern_matches = analyzer.search_sensitive_files()
+                else:
+                    print(f"{Colors.YELLOW}[!] No active connection or firmware loaded. Please select option 1 or 2 first.{Colors.RESET}")
+                    continue
+            
+            elif choice == '4':
+                # Option 4: Generate report
+                if not (files_by_type or pattern_matches or bin_results or iot_results or process_data):
+                    print(f"{Colors.YELLOW}[!] No data available for report generation. Please run an analysis first.{Colors.RESET}")
+                    continue
+                
+                # Generate report
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                report_file = f"iot_scout_report_{timestamp}.md"
+                
+                with open(report_file, 'w') as f:
+                    # Write header
+                    f.write("# IoT Scout Analysis Report\n\n")
+                    f.write("---\n\n")
+                    
+                    # Add timestamp
+                    f.write(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                    
+                    # Add process list if available
+                    if process_data:
+                        f.write("## Process List\n\n")
+                        f.write("| PID | USER | CMD | Description |\n")
+                        f.write("|-----|------|-----|-------------|\n")
+                        for proc in process_data:
+                            f.write(f"| {proc['pid']} | {proc['user']} | {proc['cmd']} | {proc['description']} |\n")
+                        f.write("\n---\n\n")
+                    
+                    # Add firmware analysis results if available
+                    if bin_results or iot_results:
+                        f.write("## Firmware Analysis\n\n")
+                        
+                        if bin_results:
+                            f.write("### Binary Analysis\n\n")
+                            for category, files in bin_results.items():
+                                f.write(f"#### {category}\n\n")
+                                for file in files:
+                                    f.write(f"- {file}\n")
+                                f.write("\n")
+                        
+                        if iot_results:
+                            f.write("### IoT-Specific Analysis\n\n")
+                            for category, files in iot_results.items():
+                                f.write(f"#### {category}\n\n")
+                                for file in files:
+                                    f.write(f"- {file}\n")
+                                f.write("\n")
+                        
+                        f.write("---\n\n")
+                    
+                    # Add sensitive file search results if available
+                    if files_by_type or pattern_matches:
+                        f.write("## Sensitive Information Search\n\n")
+                        
+                        if files_by_type:
+                            f.write("### Found Files\n\n")
+                            for file_type, files in files_by_type.items():
+                                if files:
+                                    f.write(f"#### {file_type} Files\n\n")
+                                    for file in files:
+                                        f.write(f"- {file}\n")
+                                    f.write("\n")
+                                else:
+                                    f.write(f"#### {file_type} Files\n\n")
+                                    f.write("**Not Found**\n\n")
+                        
+                        if pattern_matches:
+                            f.write("### Pattern Matches\n\n")
+                            for category, files in pattern_matches.items():
+                                if files:
+                                    f.write(f"#### {category}\n\n")
+                                    for file_path, matches in files.items():
+                                        f.write(f"**{file_path}**\n\n")
+                                        for match in matches:
+                                            f.write(f"- {match}\n")
+                                        f.write("\n")
+                                else:
+                                    f.write(f"#### {category}\n\n")
+                                    f.write("**Not Found**\n\n")
+                
+                print(f"{Colors.GREEN}[+] Report generated: {report_file}{Colors.RESET}")
+            
+            elif choice == '5':
+                # Option 5: Exit
+                break
+            
+            else:
+                print(f"{Colors.YELLOW}[!] Invalid choice. Please enter a number between 1 and 5.{Colors.RESET}")
+        
     except Exception as e:
         logger.error(f"Application error: {e}")
         print(f"{Colors.RED}[!] An error occurred: {e}{Colors.RESET}")
     finally:
-        if 'serial_manager' in locals():
+        if serial_manager:
             serial_manager.close()
         print(f"{Colors.CYAN}Exiting...{Colors.RESET}")
 
