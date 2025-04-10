@@ -12,6 +12,12 @@ import sys
 import subprocess
 import readline
 import glob
+import binwalk
+import shutil
+import tempfile
+import importlib.util
+import contextlib
+import io
 
 # Initialize colorama
 init()
@@ -22,6 +28,16 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+@contextlib.contextmanager
+def suppress_stderr():
+    """Context manager to suppress stderr output."""
+    stderr = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        yield
+    finally:
+        sys.stderr = stderr
 
 class Colors:
     """Color constants for terminal output."""
@@ -290,14 +306,41 @@ class SerialManager:
             self.serial_port.close()
             logger.info("Serial connection closed")
 
+def check_dependencies() -> bool:
+    """Check if all required dependencies are installed."""
+    missing_deps = []
+    
+    # Check for binwalk
+    try:
+        import binwalk
+    except ImportError:
+        missing_deps.append("binwalk")
+    
+    # Check for jefferson
+    try:
+        import jefferson
+    except ImportError:
+        missing_deps.append("jefferson")
+    
+    if missing_deps:
+        print(f"{Colors.RED}[!] Missing required dependencies: {', '.join(missing_deps)}{Colors.RESET}")
+        print(f"{Colors.YELLOW}[!] Please install them using: pip install {' '.join(missing_deps)}{Colors.RESET}")
+        return False
+    
+    return True
+
 class LocalFirmwareAnalyzer:
     """Analyzes local firmware files."""
     
     def __init__(self, firmware_path: str):
         """Initialize firmware analyzer."""
+        if not check_dependencies():
+            raise RuntimeError("Missing required dependencies")
+            
         self.firmware_path = firmware_path
         self.classifier = CommandClassifier()
         self.bin_directories = []
+        self.extracted_path = None
         self.common_iot_binaries = [
             'busybox', 'dropbear', 'iptables', 'httpd', 'dhcpd', 'udhcpc', 'udhcpd',
             'dnsmasq', 'hostapd', 'wpa_supplicant', 'pppd', 'pppoe', 'pptp', 'l2tp',
@@ -308,6 +351,221 @@ class LocalFirmwareAnalyzer:
             'dropbearmulti', 'busybox-suid'
         ]
         
+        # Check if the input is a .bin file
+        if self.firmware_path.endswith('.bin'):
+            self.extract_firmware()
+            
+    def extract_firmware(self) -> None:
+        """Extract firmware using binwalk."""
+        print(f"{Colors.CYAN}[+] Extracting firmware using binwalk...{Colors.RESET}")
+        
+        # Create a temporary directory for extraction
+        self.extracted_path = tempfile.mkdtemp(prefix='iot_scout_')
+        
+        try:
+            # First, try to identify the filesystem type
+            print(f"{Colors.CYAN}[+] Analyzing firmware structure...{Colors.RESET}")
+            
+            # Suppress all binwalk warnings
+            logging.getLogger('binwalk').setLevel(logging.ERROR)
+            logging.getLogger('binwalk.modules').setLevel(logging.ERROR)
+            logging.getLogger('binwalk.modules.extractor').setLevel(logging.ERROR)
+            
+            with suppress_stderr():
+                modules = binwalk.scan(self.firmware_path, signature=True, quiet=True)
+            
+            # Check if we have a JFFS2 filesystem
+            has_jffs2 = False
+            for module in modules:
+                for result in module.results:
+                    if 'jffs2' in result.description.lower():
+                        has_jffs2 = True
+                        break
+                if has_jffs2:
+                    break
+            
+            if has_jffs2:
+                print(f"{Colors.CYAN}[+] Detected JFFS2 filesystem, using jefferson for extraction...{Colors.RESET}")
+                try:
+                    import jefferson
+                    # Create jffs2-root directory
+                    jffs2_dir = os.path.join(self.extracted_path, 'jffs2-root')
+                    os.makedirs(jffs2_dir, exist_ok=True)
+                    
+                    # Use jefferson's command-line interface
+                    import subprocess
+                    with suppress_stderr():
+                        result = subprocess.run(['jefferson', '-d', jffs2_dir, self.firmware_path], 
+                                             capture_output=True, text=True)
+                    
+                    if result.returncode == 0:
+                        self.firmware_path = jffs2_dir
+                        print(f"{Colors.GREEN}[+] JFFS2 filesystem extracted to: {self.firmware_path}{Colors.RESET}")
+                    else:
+                        print(f"{Colors.YELLOW}[!] Error using jefferson: {result.stderr}{Colors.RESET}")
+                        print(f"{Colors.YELLOW}[!] Falling back to binwalk extraction...{Colors.RESET}")
+                        has_jffs2 = False
+                except Exception as e:
+                    print(f"{Colors.YELLOW}[!] Error using jefferson: {e}{Colors.RESET}")
+                    print(f"{Colors.YELLOW}[!] Falling back to binwalk extraction...{Colors.RESET}")
+                    has_jffs2 = False
+            
+            if not has_jffs2:
+                # Run binwalk extraction with warning suppression
+                with suppress_stderr():
+                    binwalk.scan(self.firmware_path, signature=True, extract=True, 
+                                directory=self.extracted_path, quiet=True)
+                
+                # Find the extracted directory
+                extracted_dirs = []
+                for item in os.listdir(self.extracted_path):
+                    item_path = os.path.join(self.extracted_path, item)
+                    if os.path.isdir(item_path):
+                        if item.endswith('.extracted') or item == 'jffs2-root':
+                            extracted_dirs.append(item)
+                
+                if extracted_dirs:
+                    # If we have multiple extracted directories, prefer jffs2-root
+                    if 'jffs2-root' in extracted_dirs:
+                        self.firmware_path = os.path.join(self.extracted_path, 'jffs2-root')
+                    else:
+                        # Use the first extracted directory
+                        self.firmware_path = os.path.join(self.extracted_path, extracted_dirs[0])
+                    print(f"{Colors.GREEN}[+] Firmware extracted to: {self.firmware_path}{Colors.RESET}")
+                else:
+                    print(f"{Colors.YELLOW}[!] No files were extracted. Using original firmware path.{Colors.RESET}")
+            
+            # Handle nested archives
+            if os.path.exists(self.firmware_path):
+                print(f"{Colors.CYAN}[+] Checking for nested archives...{Colors.RESET}")
+                archive_patterns = ['*.tar', '*.gz', '*.zip', '*.bin']
+                for pattern in archive_patterns:
+                    for archive in glob.glob(os.path.join(self.firmware_path, pattern)):
+                        print(f"{Colors.CYAN}[+] Found archive: {archive}{Colors.RESET}")
+                        try:
+                            # Extract nested archives to a subdirectory
+                            archive_dir = os.path.join(self.firmware_path, 
+                                os.path.splitext(os.path.basename(archive))[0])
+                            os.makedirs(archive_dir, exist_ok=True)
+                            with suppress_stderr():
+                                binwalk.scan(archive, signature=True, extract=True,
+                                          directory=archive_dir, quiet=True)
+                        except Exception as e:
+                            print(f"{Colors.YELLOW}[!] Error extracting nested archive {archive}: {e}{Colors.RESET}")
+                
+        except Exception as e:
+            print(f"{Colors.RED}[!] Error extracting firmware: {e}{Colors.RESET}")
+            print(f"{Colors.YELLOW}[!] Using original firmware path.{Colors.RESET}")
+            
+    def search_sensitive_files(self) -> None:
+        """Search for sensitive files and content in the firmware."""
+        print(f"\n{Colors.CYAN}[+] Searching for sensitive files and content...{Colors.RESET}")
+        
+        # Files to search for
+        sensitive_files = [
+            '/etc/passwd',
+            '/etc/shadow',
+            '/etc/config/passwd',
+            '/etc/config/shadow',
+            'config/passwd',
+            'config/shadow',
+            # Add JFFS2 specific paths
+            'etc/passwd',
+            'etc/shadow',
+            'etc/config/passwd',
+            'etc/config/shadow',
+            'config/passwd',
+            'config/shadow'
+        ]
+        
+        # Patterns to search for
+        sensitive_patterns = [
+            r'password\s*[=:]\s*[\'"][^\'"]+[\'"]',
+            r'api[_-]?key\s*[=:]\s*[\'"][^\'"]+[\'"]',
+            r'secret\s*[=:]\s*[\'"][^\'"]+[\'"]',
+            r'admin\s*[=:]\s*[\'"][^\'"]+[\'"]',
+            r'root\s*[=:]\s*[\'"][^\'"]+[\'"]',
+            # Add JFFS2 specific patterns
+            r'root:.*:0:0:',
+            r'admin:.*:0:0:',
+            r'config\s*{\s*password\s*[\'"][^\'"]+[\'"]',
+            r'wireless\s*{\s*key\s*[\'"][^\'"]+[\'"]'
+        ]
+        
+        def try_read_file(file_path: str) -> Tuple[str, bool]:
+            """Try to read a file with different encodings and methods."""
+            try:
+                with open(file_path, 'rb') as f:
+                    content = f.read()
+                    # Try different encodings
+                    for encoding in ['utf-8', 'latin-1', 'ascii']:
+                        try:
+                            return content.decode(encoding), True
+                        except UnicodeDecodeError:
+                            continue
+                    # If all decodings fail, return raw content
+                    return content.decode('latin-1', errors='replace'), True
+            except Exception as e:
+                return f"Error reading file: {str(e)}", False
+
+        def is_binary_file(file_path: str) -> bool:
+            """Check if a file is binary."""
+            try:
+                with open(file_path, 'rb') as f:
+                    # Read first 1024 bytes
+                    chunk = f.read(1024)
+                    # Check for binary indicators
+                    return b'\x00' in chunk or any(b in chunk for b in range(0x01, 0x20))
+            except Exception:
+                return True
+
+        # Search for sensitive files
+        print(f"\n{Colors.CYAN}[+] Found sensitive files:{Colors.RESET}")
+        for file_pattern in sensitive_files:
+            for root, _, files in os.walk(self.firmware_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    # Check both exact matches and if the file path contains the pattern
+                    if file_pattern in file_path or file_pattern in os.path.join(root, file):
+                        print(f"\n{Colors.GREEN}{file_path}{Colors.RESET}")
+                        content, success = try_read_file(file_path)
+                        if success and content.strip():
+                            # Print only non-empty lines
+                            for line in content.splitlines():
+                                if line.strip():
+                                    print(f"  {line.strip()}")
+        
+        # Search for sensitive patterns
+        print(f"\n{Colors.CYAN}[+] Found sensitive patterns:{Colors.RESET}")
+        for pattern in sensitive_patterns:
+            for root, _, files in os.walk(self.firmware_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    content, success = try_read_file(file_path)
+                    if success:
+                        try:
+                            matches = list(re.finditer(pattern, content, re.IGNORECASE))
+                            if matches:  # Only process if we found matches
+                                print(f"\n{Colors.GREEN}{file_path}{Colors.RESET}")
+                                for match in matches:
+                                    line_start = max(0, content.rfind('\n', 0, match.start()) + 1)
+                                    line_end = content.find('\n', match.end())
+                                    if line_end == -1:
+                                        line_end = len(content)
+                                    context = content[line_start:line_end].strip()
+                                    if context:  # Only print if we have content
+                                        print(f"  {context}")
+                        except Exception:
+                            continue  # Skip files that can't be processed
+                        
+    def __del__(self):
+        """Cleanup extracted files on object destruction."""
+        if self.extracted_path and os.path.exists(self.extracted_path):
+            try:
+                shutil.rmtree(self.extracted_path)
+            except Exception as e:
+                logger.warning(f"Failed to cleanup extracted files: {e}")
+
     def find_bin_directories(self) -> List[str]:
         """Recursively find all bin directories in the firmware."""
         print(f"{Colors.CYAN}[+] Searching for bin directories...{Colors.RESET}")
@@ -536,13 +794,14 @@ def display_startup_menu() -> int:
     print(f"\n{Colors.CYAN}=== IoT Scout Startup Menu ==={Colors.RESET}")
     print(f"{Colors.CYAN}1. Capture live from UART{Colors.RESET}")
     print(f"{Colors.CYAN}2. Recon from local firmware{Colors.RESET}")
+    print(f"{Colors.CYAN}3. Search for sensitive information{Colors.RESET}")
     
     while True:
         try:
-            choice = int(input(f"\n{Colors.CYAN}Enter your choice (1-2): {Colors.RESET}"))
-            if choice in [1, 2]:
+            choice = int(input(f"\n{Colors.CYAN}Enter your choice (1-3): {Colors.RESET}"))
+            if choice in [1, 2, 3]:
                 return choice
-            print(f"{Colors.YELLOW}[!] Invalid choice. Please enter 1 or 2.{Colors.RESET}")
+            print(f"{Colors.YELLOW}[!] Invalid choice. Please enter 1, 2, or 3.{Colors.RESET}")
         except ValueError:
             print(f"{Colors.YELLOW}[!] Invalid input. Please enter a number.{Colors.RESET}")
 
@@ -624,9 +883,12 @@ def main():
             analyzer = LocalFirmwareAnalyzer(firmware_path)
             
             try:
-                bin_results = analyzer.analyze_bin_directories()
-                iot_results = analyzer.find_common_iot_binaries()
-                analyzer.display_analysis(bin_results, iot_results)
+                if choice == 2:
+                    bin_results = analyzer.analyze_bin_directories()
+                    iot_results = analyzer.find_common_iot_binaries()
+                    analyzer.display_analysis(bin_results, iot_results)
+                else:  # choice == 3
+                    analyzer.search_sensitive_files()
             except Exception as e:
                 print(f"{Colors.RED}[!] Error analyzing firmware: {e}{Colors.RESET}")
                 
